@@ -7,6 +7,11 @@ on:
     paths:
       - "CursorBridge-SKSE-1.7.104-Source-v1.1.0/CursorBridge/**"
       - ".github/workflows/build.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "CursorBridge-SKSE-1.7.104-Source-v1.1.0/CursorBridge/**"
+      - ".github/workflows/build.yml"
 
 permissions:
   contents: read
