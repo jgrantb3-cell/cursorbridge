@@ -1,0 +1,49 @@
+name: Build CursorBridge
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "CursorBridge-SKSE-1.7.104-Source-v1.1.0/CursorBridge/**"
+      - ".github/workflows/build.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install CMake and Ninja
+        uses: lukka/get-cmake@latest
+
+      - name: Get vcpkg
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git
+          ./vcpkg/bootstrap-vcpkg.bat -disableMetrics
+          "VCPKG_ROOT=$($pwd.Path)\vcpkg" >> $env:GITHUB_ENV
+
+      - name: Configure
+        working-directory: CursorBridge-SKSE-1.7.104-Source-v1.1.0/CursorBridge
+        run: cmake --preset release
+
+      - name: Build
+        working-directory: CursorBridge-SKSE-1.7.104-Source-v1.1.0/CursorBridge
+        run: cmake --build --preset release
+
+      - name: Package
+        working-directory: CursorBridge-SKSE-1.7.104-Source-v1.1.0/CursorBridge
+        run: Compress-Archive -Path build/package/* -DestinationPath CursorBridge-SKSE-1.7.104-v1.1.0.zip
+
+      - name: Upload Vortex-ready archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: CursorBridge-SKSE-1.7.104-v1.1.0
+          path: CursorBridge-SKSE-1.7.104-Source-v1.1.0/CursorBridge/CursorBridge-SKSE-1.7.104-v1.1.0.zip
