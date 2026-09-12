@@ -7,6 +7,7 @@
 #include <atomic>
 #include <chrono>
 #include <memory>
+#include <string>
 #include <string_view>
 #include <thread>
 #include <unordered_set>
@@ -53,17 +54,18 @@ namespace
                 return RE::BSEventNotifyControl::kContinue;
             }
 
+            const std::string menuName{ event->menuName.c_str() };
             if (event->opening) {
-                openMenus.insert(event->menuName);
+                openMenus.insert(menuName);
             } else {
-                openMenus.erase(event->menuName);
+                openMenus.erase(menuName);
             }
             releaseCursor.store(!openMenus.empty(), std::memory_order_release);
             return RE::BSEventNotifyControl::kContinue;
         }
 
     private:
-        std::unordered_set<RE::BSFixedString> openMenus;
+        std::unordered_set<std::string> openMenus;
     };
 
     void CursorWorker()
