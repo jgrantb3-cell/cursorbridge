@@ -29,6 +29,11 @@ jobs:
       - name: Install CMake and Ninja
         uses: lukka/get-cmake@latest
 
+      - name: Set up MSVC x64
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
       - name: Get vcpkg
         run: |
           git clone https://github.com/microsoft/vcpkg.git
