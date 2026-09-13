@@ -10,28 +10,77 @@
 namespace
 {
     std::atomic_bool started{ false };
+    std::atomic_bool cursorMenuActive{ false };
 
     using ClipCursor_t = BOOL(WINAPI*)(const RECT*);
     using SetCursorPos_t = BOOL(WINAPI*)(int, int);
+    using ShowCursor_t = int(WINAPI*)(BOOL);
 
     ClipCursor_t originalClipCursor = nullptr;
     SetCursorPos_t originalSetCursorPos = nullptr;
+    ShowCursor_t originalShowCursor = nullptr;
 
-    bool IsSkyrimForeground()
+    HWND GetSkyrimWindow()
     {
         const HWND foreground = ::GetForegroundWindow();
         if (!foreground) {
-            return false;
+            return nullptr;
         }
 
         DWORD foregroundProcess = 0;
         ::GetWindowThreadProcessId(foreground, &foregroundProcess);
-        return foregroundProcess == ::GetCurrentProcessId();
+        return foregroundProcess == ::GetCurrentProcessId() ? foreground : nullptr;
     }
+
+    bool IsCursorMenuOpen()
+    {
+        const auto ui = RE::UI::GetSingleton();
+        if (!ui) {
+            return false;
+        }
+
+        for (const auto& menu : ui->menuStack) {
+            if (menu && menu->OnStack() && menu->UsesCursor()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void RefreshCursorMenuState()
+    {
+        const bool active = IsCursorMenuOpen();
+        const bool previous = cursorMenuActive.exchange(active);
+        if (active != previous) {
+            SKSE::log::info("Cursor menu {}", active ? "opened" : "closed");
+        }
+    }
+
+    class MenuEventSink final : public RE::BSTEventSink<RE::MenuOpenCloseEvent>
+    {
+    public:
+        RE::BSEventNotifyControl ProcessEvent(
+            const RE::MenuOpenCloseEvent*,
+            RE::BSTEventSource<RE::MenuOpenCloseEvent>*) override
+        {
+            // MenuOpenCloseEvent is sent while the menu stack is changing. Queue the
+            // scan so the final top-level cursor state is observed on the game thread.
+            if (const auto tasks = SKSE::GetTaskInterface()) {
+                tasks->AddTask(RefreshCursorMenuState);
+            }
+            return RE::BSEventNotifyControl::kContinue;
+        }
+
+        static MenuEventSink* GetSingleton()
+        {
+            static MenuEventSink singleton;
+            return std::addressof(singleton);
+        }
+    };
 
     BOOL WINAPI HookClipCursor(const RECT* rect)
     {
-        if (IsSkyrimForeground()) {
+        if (cursorMenuActive.load() && GetSkyrimWindow()) {
             return originalClipCursor(nullptr);
         }
         return originalClipCursor(rect);
@@ -39,13 +88,34 @@ namespace
 
     BOOL WINAPI HookSetCursorPos(int x, int y)
     {
-        if (IsSkyrimForeground()) {
-            // Skyrim recenters the system cursor while using relative mouse input.
-            // Reporting success without moving it prevents the pointer being pulled
-            // back into the game window.
+        if (cursorMenuActive.load() && GetSkyrimWindow()) {
             return TRUE;
         }
         return originalSetCursorPos(x, y);
+    }
+
+    int WINAPI HookShowCursor(BOOL show)
+    {
+        if (cursorMenuActive.load()) {
+            // CursorWorker owns the Windows visibility count while a cursor-driven
+            // Skyrim menu is open.
+            return 0;
+        }
+        return originalShowCursor(show);
+    }
+
+    bool CreateApiHook(
+        const char* name,
+        LPVOID hook,
+        LPVOID* original)
+    {
+        const MH_STATUS status =
+            ::MH_CreateHookApi(L"user32.dll", name, hook, original);
+        if (status != MH_OK && status != MH_ERROR_ALREADY_CREATED) {
+            SKSE::log::error("{} hook creation failed: {}", name, static_cast<int>(status));
+            return false;
+        }
+        return true;
     }
 
     bool InstallCursorHooks()
@@ -56,29 +126,20 @@ namespace
             return false;
         }
 
-        const MH_STATUS clipStatus = ::MH_CreateHookApi(
-            L"user32.dll",
+        const bool clipCreated = CreateApiHook(
             "ClipCursor",
             reinterpret_cast<LPVOID>(&HookClipCursor),
             reinterpret_cast<LPVOID*>(&originalClipCursor));
-
-        const MH_STATUS positionStatus = ::MH_CreateHookApi(
-            L"user32.dll",
+        const bool positionCreated = CreateApiHook(
             "SetCursorPos",
             reinterpret_cast<LPVOID>(&HookSetCursorPos),
             reinterpret_cast<LPVOID*>(&originalSetCursorPos));
+        const bool visibilityCreated = CreateApiHook(
+            "ShowCursor",
+            reinterpret_cast<LPVOID>(&HookShowCursor),
+            reinterpret_cast<LPVOID*>(&originalShowCursor));
 
-        const bool clipCreated = clipStatus == MH_OK || clipStatus == MH_ERROR_ALREADY_CREATED;
-        const bool positionCreated =
-            positionStatus == MH_OK || positionStatus == MH_ERROR_ALREADY_CREATED;
-
-        if (!clipCreated) {
-            SKSE::log::error("ClipCursor hook creation failed: {}", static_cast<int>(clipStatus));
-        }
-        if (!positionCreated) {
-            SKSE::log::error("SetCursorPos hook creation failed: {}", static_cast<int>(positionStatus));
-        }
-        if (!clipCreated && !positionCreated) {
+        if (!clipCreated || !positionCreated || !visibilityCreated) {
             return false;
         }
 
@@ -89,28 +150,126 @@ namespace
         }
 
         SKSE::log::info(
-            "Cursor hooks active (ClipCursor={}, SetCursorPos={})",
+            "Cursor hooks active (ClipCursor={}, SetCursorPos={}, ShowCursor={})",
             clipCreated,
-            positionCreated);
+            positionCreated,
+            visibilityCreated);
         return true;
+    }
+
+    void PositionWindowsCursorFromMenu(HWND window)
+    {
+        const auto cursor = RE::MenuCursor::GetSingleton();
+        if (!cursor || !originalSetCursorPos) {
+            return;
+        }
+
+        const auto& data = cursor->GetRuntimeData();
+        RECT client{};
+        if (!::GetClientRect(window, &client) ||
+            data.screenWidthX <= 0.0F ||
+            data.screenWidthY <= 0.0F) {
+            return;
+        }
+
+        POINT origin{ client.left, client.top };
+        ::ClientToScreen(window, &origin);
+        const int width = client.right - client.left;
+        const int height = client.bottom - client.top;
+        const int x = origin.x + static_cast<int>(data.cursorPosX * width / data.screenWidthX);
+        const int y = origin.y + static_cast<int>(data.cursorPosY * height / data.screenWidthY);
+        originalSetCursorPos(x, y);
+    }
+
+    void SynchronizeMenuCursor(HWND window)
+    {
+        const auto cursor = RE::MenuCursor::GetSingleton();
+        if (!cursor) {
+            return;
+        }
+
+        RECT client{};
+        POINT point{};
+        if (!::GetClientRect(window, &client) || !::GetCursorPos(&point)) {
+            return;
+        }
+
+        POINT origin{ client.left, client.top };
+        ::ClientToScreen(window, &origin);
+        const int width = client.right - client.left;
+        const int height = client.bottom - client.top;
+        const int clientX = point.x - origin.x;
+        const int clientY = point.y - origin.y;
+
+        if (width <= 0 || height <= 0 ||
+            clientX < 0 || clientY < 0 || clientX >= width || clientY >= height) {
+            return;
+        }
+
+        auto& data = cursor->GetRuntimeData();
+        data.cursorPosX = static_cast<float>(clientX) * data.screenWidthX /
+                          static_cast<float>(width);
+        data.cursorPosY = static_cast<float>(clientY) * data.screenWidthY /
+                          static_cast<float>(height);
+    }
+
+    void ForceWindowsCursorVisible()
+    {
+        if (!originalShowCursor) {
+            return;
+        }
+        while (originalShowCursor(TRUE) < 0) {
+        }
+    }
+
+    void ForceWindowsCursorHidden()
+    {
+        if (!originalShowCursor) {
+            return;
+        }
+        while (originalShowCursor(FALSE) >= 0) {
+        }
     }
 
     void CursorWorker()
     {
         ::SetThreadPriority(::GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
-        SKSE::log::info("Cursor release fallback worker started");
+        SKSE::log::info("Menu-aware dual cursor worker started");
 
+        bool wasActive = false;
         for (;;) {
-            if (IsSkyrimForeground()) {
-                // Call the unhooked function when available so the fallback cannot
-                // recurse through HookClipCursor.
+            const bool active = cursorMenuActive.load();
+            const HWND window = GetSkyrimWindow();
+
+            if (active && window) {
+                if (!wasActive) {
+                    PositionWindowsCursorFromMenu(window);
+                    ForceWindowsCursorVisible();
+                    SKSE::log::info("Windows cursor bridged to Skyrim menu");
+                }
+
                 if (originalClipCursor) {
                     originalClipCursor(nullptr);
-                } else {
-                    ::ClipCursor(nullptr);
                 }
+                SynchronizeMenuCursor(window);
+            } else if (!active && wasActive) {
+                ForceWindowsCursorHidden();
+                SKSE::log::info("Windows cursor returned to gameplay mode");
             }
-            ::Sleep(1);
+
+            wasActive = active;
+            ::Sleep(active ? 1 : 8);
+        }
+    }
+
+    void OnSKSEMessage(SKSE::MessagingInterface::Message* message)
+    {
+        if (message && message->type == SKSE::MessagingInterface::kDataLoaded) {
+            if (const auto ui = RE::UI::GetSingleton()) {
+                ui->AddEventSink(MenuEventSink::GetSingleton());
+                RefreshCursorMenuState();
+                SKSE::log::info("Menu event tracking active");
+            }
         }
     }
 }
@@ -118,10 +277,14 @@ namespace
 SKSEPluginLoad(const SKSE::LoadInterface* skse)
 {
     SKSE::Init(skse);
-    SKSE::log::info("CursorBridge 1.3.0 loading (Skyrim 1.7.104 build)");
+    SKSE::log::info("CursorBridge 1.4.0 loading (Skyrim 1.7.104 build)");
 
     const bool hooksInstalled = InstallCursorHooks();
-    SKSE::log::info("Direct cursor interception: {}", hooksInstalled ? "enabled" : "unavailable");
+    SKSE::log::info("Menu cursor interception: {}", hooksInstalled ? "enabled" : "unavailable");
+
+    if (const auto messaging = SKSE::GetMessagingInterface()) {
+        messaging->RegisterListener(OnSKSEMessage);
+    }
 
     if (!started.exchange(true)) {
         std::thread(CursorWorker).detach();
