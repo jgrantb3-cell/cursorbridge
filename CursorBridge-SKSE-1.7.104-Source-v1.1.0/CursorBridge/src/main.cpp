@@ -22,6 +22,8 @@ namespace
     ShowCursor_t originalShowCursor = nullptr;
     SetCursor_t originalSetCursor = nullptr;
     HCURSOR arrowCursor = nullptr;
+    HHOOK windowThreadHook = nullptr;
+    constexpr UINT cursorVisibilityMessage = WM_APP + 0x4CB;
 
     HWND GetSkyrimWindow()
     {
@@ -50,23 +52,18 @@ namespace
         return false;
     }
 
-    void RefreshCursorMenuState()
+    LRESULT CALLBACK WindowThreadMessageHook(int code, WPARAM wParam, LPARAM lParam)
     {
-        const bool active = IsCursorMenuOpen();
-        const bool previous = cursorMenuActive.exchange(active);
-        if (active != previous) {
-            SKSE::log::info("Cursor menu {}", active ? "opened" : "closed");
-
-            // ShowCursor's display counter belongs to the window-owning UI thread.
-            // RefreshCursorMenuState runs through SKSE's main-thread task queue, so
-            // visibility must be changed here rather than in CursorWorker.
-            if (originalShowCursor) {
+        if (code >= 0 && lParam) {
+            const auto message = reinterpret_cast<const CWPSTRUCT*>(lParam);
+            if (message->message == cursorVisibilityMessage && originalShowCursor) {
+                const bool visible = message->wParam != 0;
                 int visibilityCount = 0;
-                if (active) {
+
+                if (visible) {
                     do {
                         visibilityCount = originalShowCursor(TRUE);
                     } while (visibilityCount < 0);
-
                     if (originalSetCursor && arrowCursor) {
                         originalSetCursor(arrowCursor);
                     }
@@ -75,9 +72,59 @@ namespace
                         visibilityCount = originalShowCursor(FALSE);
                     } while (visibilityCount >= 0);
                 }
+
                 SKSE::log::info(
-                    "UI-thread Windows cursor visibility count: {}",
-                    visibilityCount);
+                    "Window-thread cursor visibility count: {} ({})",
+                    visibilityCount,
+                    visible ? "visible" : "hidden");
+            }
+        }
+        return ::CallNextHookEx(windowThreadHook, code, wParam, lParam);
+    }
+
+    bool InstallWindowThreadHook()
+    {
+        const HWND window = GetSkyrimWindow();
+        if (!window) {
+            SKSE::log::error("Could not locate the foreground Skyrim window");
+            return false;
+        }
+
+        DWORD processId = 0;
+        const DWORD threadId = ::GetWindowThreadProcessId(window, &processId);
+        if (!threadId || processId != ::GetCurrentProcessId()) {
+            SKSE::log::error("Could not identify Skyrim window thread");
+            return false;
+        }
+
+        windowThreadHook =
+            ::SetWindowsHookExW(WH_CALLWNDPROC, WindowThreadMessageHook, nullptr, threadId);
+        if (!windowThreadHook) {
+            SKSE::log::error(
+                "Window-thread cursor hook failed with Windows error {}",
+                ::GetLastError());
+            return false;
+        }
+
+        SKSE::log::info("Window-thread cursor hook active on thread {}", threadId);
+        return true;
+    }
+
+    void RefreshCursorMenuState()
+    {
+        const bool active = IsCursorMenuOpen();
+        const bool previous = cursorMenuActive.exchange(active);
+        if (active != previous) {
+            SKSE::log::info("Cursor menu {}", active ? "opened" : "closed");
+
+            if (const HWND window = GetSkyrimWindow()) {
+                ::SendMessageW(
+                    window,
+                    cursorVisibilityMessage,
+                    active ? static_cast<WPARAM>(1) : static_cast<WPARAM>(0),
+                    0);
+            } else {
+                SKSE::log::warn("Skyrim window unavailable for cursor visibility change");
             }
         }
     }
@@ -307,8 +354,11 @@ namespace
         if (message && message->type == SKSE::MessagingInterface::kDataLoaded) {
             if (const auto ui = RE::UI::GetSingleton()) {
                 ui->AddEventSink(MenuEventSink::GetSingleton());
+                const bool windowHookInstalled = InstallWindowThreadHook();
                 RefreshCursorMenuState();
-                SKSE::log::info("Menu event tracking active");
+                SKSE::log::info(
+                    "Menu event tracking active (window hook={})",
+                    windowHookInstalled);
             }
         }
     }
@@ -317,7 +367,7 @@ namespace
 SKSEPluginLoad(const SKSE::LoadInterface* skse)
 {
     SKSE::Init(skse);
-    SKSE::log::info("CursorBridge 1.6.0 loading (Skyrim 1.7.104 build)");
+    SKSE::log::info("CursorBridge 1.7.0 loading (Skyrim 1.7.104 build)");
 
     arrowCursor = ::LoadCursorW(nullptr, IDC_ARROW);
     SKSE::log::info("Windows arrow cursor loaded: {}", arrowCursor != nullptr);
