@@ -15,10 +15,13 @@ namespace
     using ClipCursor_t = BOOL(WINAPI*)(const RECT*);
     using SetCursorPos_t = BOOL(WINAPI*)(int, int);
     using ShowCursor_t = int(WINAPI*)(BOOL);
+    using SetCursor_t = HCURSOR(WINAPI*)(HCURSOR);
 
     ClipCursor_t originalClipCursor = nullptr;
     SetCursorPos_t originalSetCursorPos = nullptr;
     ShowCursor_t originalShowCursor = nullptr;
+    SetCursor_t originalSetCursor = nullptr;
+    HCURSOR arrowCursor = nullptr;
 
     HWND GetSkyrimWindow()
     {
@@ -104,6 +107,17 @@ namespace
         return originalShowCursor(show);
     }
 
+    HCURSOR WINAPI HookSetCursor(HCURSOR cursor)
+    {
+        if (cursorMenuActive.load()) {
+            // Skyrim normally installs a transparent/null system cursor and draws
+            // its own bounded Scaleform pointer. Keep the real desktop pointer
+            // visible so it can cross onto another monitor.
+            return originalSetCursor(arrowCursor ? arrowCursor : cursor);
+        }
+        return originalSetCursor(cursor);
+    }
+
     bool CreateApiHook(
         const char* name,
         LPVOID hook,
@@ -138,8 +152,12 @@ namespace
             "ShowCursor",
             reinterpret_cast<LPVOID>(&HookShowCursor),
             reinterpret_cast<LPVOID*>(&originalShowCursor));
+        const bool cursorImageCreated = CreateApiHook(
+            "SetCursor",
+            reinterpret_cast<LPVOID>(&HookSetCursor),
+            reinterpret_cast<LPVOID*>(&originalSetCursor));
 
-        if (!clipCreated || !positionCreated || !visibilityCreated) {
+        if (!clipCreated || !positionCreated || !visibilityCreated || !cursorImageCreated) {
             return false;
         }
 
@@ -150,10 +168,11 @@ namespace
         }
 
         SKSE::log::info(
-            "Cursor hooks active (ClipCursor={}, SetCursorPos={}, ShowCursor={})",
+            "Cursor hooks active (ClipCursor={}, SetCursorPos={}, ShowCursor={}, SetCursor={})",
             clipCreated,
             positionCreated,
-            visibilityCreated);
+            visibilityCreated,
+            cursorImageCreated);
         return true;
     }
 
@@ -245,7 +264,10 @@ namespace
                 if (!wasActive) {
                     PositionWindowsCursorFromMenu(window);
                     ForceWindowsCursorVisible();
-                    SKSE::log::info("Windows cursor bridged to Skyrim menu");
+                    if (originalSetCursor && arrowCursor) {
+                        originalSetCursor(arrowCursor);
+                    }
+                    SKSE::log::info("Visible Windows cursor bridged to Skyrim menu");
                 }
 
                 if (originalClipCursor) {
@@ -277,7 +299,10 @@ namespace
 SKSEPluginLoad(const SKSE::LoadInterface* skse)
 {
     SKSE::Init(skse);
-    SKSE::log::info("CursorBridge 1.4.0 loading (Skyrim 1.7.104 build)");
+    SKSE::log::info("CursorBridge 1.5.0 loading (Skyrim 1.7.104 build)");
+
+    arrowCursor = ::LoadCursorW(nullptr, IDC_ARROW);
+    SKSE::log::info("Windows arrow cursor loaded: {}", arrowCursor != nullptr);
 
     const bool hooksInstalled = InstallCursorHooks();
     SKSE::log::info("Menu cursor interception: {}", hooksInstalled ? "enabled" : "unavailable");
