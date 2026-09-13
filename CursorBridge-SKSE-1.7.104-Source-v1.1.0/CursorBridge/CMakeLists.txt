@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(CursorBridge VERSION 1.2.0 LANGUAGES CXX)
+project(CursorBridge VERSION 1.3.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -21,6 +21,8 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(CommonLibSSE)
 include("${commonlibsse_SOURCE_DIR}/cmake/CommonLibSSE.cmake")
 
+find_package(minhook CONFIG REQUIRED)
+
 add_commonlibsse_plugin(${PROJECT_NAME}
     AUTHOR "OpenAI"
     SOURCES src/main.cpp
@@ -28,6 +30,7 @@ add_commonlibsse_plugin(${PROJECT_NAME}
 
 target_precompile_headers(${PROJECT_NAME} PRIVATE src/PCH.h)
 target_compile_definitions(${PROJECT_NAME} PRIVATE UNICODE _UNICODE)
+target_link_libraries(${PROJECT_NAME} PRIVATE minhook::minhook)
 
 add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory
