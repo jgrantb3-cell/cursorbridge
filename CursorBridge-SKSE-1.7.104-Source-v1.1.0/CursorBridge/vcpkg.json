@@ -1,11 +1,12 @@
 {
   "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg/master/scripts/vcpkg.schema.json",
   "name": "cursor-bridge",
-  "version-string": "1.1.1",
+  "version-string": "1.3.0",
   "dependencies": [
     "directxmath",
     "directxtk",
     "fmt",
+    "minhook",
     "nlohmann-json",
     "rapidcsv",
     "simpleini",
