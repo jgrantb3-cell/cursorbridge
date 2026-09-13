@@ -56,6 +56,29 @@ namespace
         const bool previous = cursorMenuActive.exchange(active);
         if (active != previous) {
             SKSE::log::info("Cursor menu {}", active ? "opened" : "closed");
+
+            // ShowCursor's display counter belongs to the window-owning UI thread.
+            // RefreshCursorMenuState runs through SKSE's main-thread task queue, so
+            // visibility must be changed here rather than in CursorWorker.
+            if (originalShowCursor) {
+                int visibilityCount = 0;
+                if (active) {
+                    do {
+                        visibilityCount = originalShowCursor(TRUE);
+                    } while (visibilityCount < 0);
+
+                    if (originalSetCursor && arrowCursor) {
+                        originalSetCursor(arrowCursor);
+                    }
+                } else {
+                    do {
+                        visibilityCount = originalShowCursor(FALSE);
+                    } while (visibilityCount >= 0);
+                }
+                SKSE::log::info(
+                    "UI-thread Windows cursor visibility count: {}",
+                    visibilityCount);
+            }
         }
     }
 
@@ -263,11 +286,7 @@ namespace
             if (active && window) {
                 if (!wasActive) {
                     PositionWindowsCursorFromMenu(window);
-                    ForceWindowsCursorVisible();
-                    if (originalSetCursor && arrowCursor) {
-                        originalSetCursor(arrowCursor);
-                    }
-                    SKSE::log::info("Visible Windows cursor bridged to Skyrim menu");
+                    SKSE::log::info("Windows cursor position bridged to Skyrim menu");
                 }
 
                 if (originalClipCursor) {
@@ -275,7 +294,6 @@ namespace
                 }
                 SynchronizeMenuCursor(window);
             } else if (!active && wasActive) {
-                ForceWindowsCursorHidden();
                 SKSE::log::info("Windows cursor returned to gameplay mode");
             }
 
@@ -299,7 +317,7 @@ namespace
 SKSEPluginLoad(const SKSE::LoadInterface* skse)
 {
     SKSE::Init(skse);
-    SKSE::log::info("CursorBridge 1.5.0 loading (Skyrim 1.7.104 build)");
+    SKSE::log::info("CursorBridge 1.6.0 loading (Skyrim 1.7.104 build)");
 
     arrowCursor = ::LoadCursorW(nullptr, IDC_ARROW);
     SKSE::log::info("Windows arrow cursor loaded: {}", arrowCursor != nullptr);
